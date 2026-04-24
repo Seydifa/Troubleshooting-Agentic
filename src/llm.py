@@ -10,8 +10,8 @@ Two public factories:
 - ``get_parser_llm()``     — JSON-only parsing agents (non-thinking, temperature=0)
 
 Both functions return a **module-level singleton** — the same instance is
-shared across all agents so vLLM maintains a single connection pool and the
-Python overhead of repeated object creation is eliminated.
+shared across all agents so the LLM backend maintains a single connection pool
+and the Python overhead of repeated object creation is eliminated.
 
 Call ``clear_llm_cache()`` after changing settings (e.g. switching ENV) to
 force re-initialisation on the next call.
@@ -49,10 +49,8 @@ def get_reasoning_llm() -> Any:
                 api_key=_config.settings.openrouter_api_key,
                 temperature=0.6,
                 top_p=0.95,
-                model_kwargs={
-                    "extra_body": {
-                        "top_k": 20,
-                    }
+                extra_body={
+                    "top_k": 20,
                 },
             )
         else:
@@ -62,10 +60,8 @@ def get_reasoning_llm() -> Any:
                 api_key=_config.settings.vllm_api_key,
                 temperature=0.6,
                 top_p=0.95,
-                model_kwargs={
-                    "extra_body": {
-                        "top_k": 20,
-                    }
+                extra_body={
+                    "top_k": 20,
                 },
             )
     return _reasoning_llm
@@ -91,10 +87,8 @@ def get_parser_llm() -> Any:
                 api_key=_config.settings.openrouter_api_key,
                 temperature=0,
                 max_tokens=1024,
-                model_kwargs={
-                    "extra_body": {
-                        "chat_template_kwargs": {"enable_thinking": False},
-                    }
+                extra_body={
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
             )
         else:
@@ -104,10 +98,8 @@ def get_parser_llm() -> Any:
                 api_key=_config.settings.vllm_api_key,
                 temperature=0,
                 max_tokens=1024,
-                model_kwargs={
-                    "extra_body": {
-                        "chat_template_kwargs": {"enable_thinking": False},
-                    }
+                extra_body={
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
             )
     return _parser_llm
