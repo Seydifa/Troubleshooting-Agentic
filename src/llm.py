@@ -55,7 +55,8 @@ def get_reasoning_llm() -> Any:
             _reasoning_llm = ChatOllama(
                 model=_config.settings.model_name,
                 base_url=_config.settings.ollama_base_url,
-                # Qwen3 thinking mode: temperature=0.6, top_p=0.95, top_k=20
+                # Disable Qwen3 extended thinking at the API level
+                think=False,
                 temperature=0.6,
                 top_p=0.95,
                 top_k=20,

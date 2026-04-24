@@ -376,8 +376,8 @@ def reasoning_node(state: QuestionStateB, *, llm) -> QuestionStateB:
         human_content += (
             f"\n\n⚠️ Previous answer was INVALID: {error_msg}\nPlease fix the format."
         )
-    # /no_think disables Qwen3 extended thinking — prevents 500 s+ think blocks
-    human_content += " /no_think"
+    # /no_think disables Qwen3 extended thinking — must be on the same line (no preceding newline)
+    human_content = human_content.rstrip() + " /no_think"
 
     messages = [
         SystemMessage(content=TRACK_B_REASONING_SYSTEM),

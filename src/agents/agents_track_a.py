@@ -151,8 +151,8 @@ def analysis_node(state: QuestionStateA, *, llm) -> QuestionStateA:
     human_content = build_track_a_analysis_prompt(features, rag_ctx, options, tag)
     if error_msg:
         human_content += f"\n\n⚠️ Previous answer was INVALID: {error_msg}\nPlease correct your answer."
-    # /no_think disables Qwen3 extended thinking — prevents 500 s+ think blocks
-    human_content += " /no_think"
+    # /no_think disables Qwen3 extended thinking — must be on the same line (no preceding newline)
+    human_content = human_content.rstrip() + " /no_think"
 
     messages = [
         SystemMessage(content=TRACK_A_ANALYSIS_SYSTEM),

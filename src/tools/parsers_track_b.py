@@ -272,8 +272,8 @@ class ParserAgent:
         )
         if error_feedback:
             human_content += f"\n\nPrevious attempt failed validation:\n{error_feedback}\nPlease fix and retry."
-        # /no_think disables Qwen3 thinking mode — keeps JSON output clean
-        human_content += " /no_think"
+        # /no_think disables Qwen3 thinking mode — must be on the same line (no preceding newline)
+        human_content = human_content.rstrip() + " /no_think"
 
         human_msg = HumanMessage(content=human_content)
 
@@ -338,7 +338,7 @@ class ParserAgent:
                     f"\n\nPrevious attempt failed validation:\n{error_fb}"
                     "\nPlease fix and retry."
                 )
-            human_content += " /no_think"
+            human_content = human_content.rstrip() + " /no_think"
             message_batches.append(
                 [
                     SystemMessage(content=TRACK_B_PARSER_SYSTEM),
