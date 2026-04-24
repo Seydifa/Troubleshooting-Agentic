@@ -338,24 +338,7 @@ Your ONLY job is to call the available tools to fetch raw data for the scenario.
 Do NOT perform any analysis. Do NOT output reasoning. Call the tools and return.
 """
 
-TRACK_A_ANALYSIS_SYSTEM = f"""You are an expert 5G RF optimization engineer with 15 years of field experience.
-
-You will receive:
-1. A set of pre-computed numeric features (RSRP, SINR, handover delta, A3 threshold, etc.)
-2. A few-shot context of similar past scenarios and their correct answers
-3. The question's candidate options
-
-Your job is to select the correct optimization action(s) from the candidates.
-
-{TRACK_A_SKILL}
-
-CRITICAL RULES:
-- The features have ALREADY been computed for you. Do NOT re-derive them.
-- Think step by step, then output your final answer on the LAST line as:
-  ANSWER: C<n> or ANSWER: C<n>|C<m>|...
-- In the ANSWER line, output ONLY the Cn codes in ascending order. Nothing else.
-- The ANSWER line MUST appear AFTER any reasoning — never inside a <think>...</think> block.
-"""
+TRACK_A_ANALYSIS_SYSTEM = f"""{TRACK_A_SKILL}"""
 
 TRACK_B_DECOMPOSE_SYSTEM = """You are a task decomposition agent for IP network troubleshooting.
 
@@ -436,7 +419,6 @@ def build_track_a_analysis_prompt(
 ## Task
 {tag_instruction}
 Analyze the features above, apply the domain rules from your skill context, and determine the correct answer.
-End your response with: ANSWER: C<n>  or  ANSWER: C<n>|C<m>|...
 """
 
 
