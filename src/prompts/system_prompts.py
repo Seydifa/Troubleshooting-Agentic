@@ -15,129 +15,42 @@ from typing import Dict, Any, List
 
 
 # ---------------------------------------------------------------------------
-# TRACK A — Skill Context (static, always injected into analysis agent)
+# TRACK A — Skill Context (dynamically loaded, always injected into analysis agent)
 # ---------------------------------------------------------------------------
 
-TRACK_A_SKILL = """
-## TRACK A SKILL — 5G RF Troubleshooting Domain Rules
-
-### A3 Handover Formula
-A3 event triggers when:
-  Serving RSRP + A3Offset < Neighbor RSRP - Hysteresis
-
-Unit conversion: A3Offset and Hysteresis are stored in 0.5 dB units.
-  threshold_db = (IntraFreqHoA3Offset + A3HystDB) * 0.5
-
-If serving_rsrp + threshold_db > neighbor_rsrp → handover has NOT triggered → LATE_HANDOVER candidate.
-delta_db = neighbor_rsrp - serving_rsrp
-
-### RSRP Quality Thresholds
-| RSRP (dBm)   | Quality     |
-|--------------|-------------|
-| > -80        | Excellent   |
-| -80 to -90   | Good        |
-| -90 to -100  | Fair        |
-| -100 to -110 | Poor        |
-| < -110       | Very poor   |
-
-### SINR Thresholds
-| SINR (dB) | Quality     |
-|-----------|-------------|
-| > 20      | Excellent   |
-| 10 to 20  | Good        |
-| 0 to 10   | Fair        |
-| < 0       | Interference / Coverage hole |
-
-### Problem Classification Rules
-- LATE_HANDOVER: handover_failure=True AND delta_db >= threshold_db (A3 event should have fired)
-- INTERFERENCE: serving_sinr < 0 dB AND serving_rsrp > -100 dBm (signal present but corrupted)
-- COVERAGE_HOLE: serving_rsrp < -110 dBm (UE is too far from any cell)
-- TX_POWER_ISSUE: serving cell max power < reference AND RSRP consistently low across sector
-- PDCCH_ISSUE: PDCCH symbol count is non-standard (not 1, 2, or 3) or mismatched with load
-- NEIGHBOR_MISSING: Strong neighbor PCI not present in the neighbor list
-- UNKNOWN: None of the above conditions clearly satisfied
-
-### Antenna / Power Optimization Guidance
-- Tilt (mechanical or electrical) reduces coverage but reduces interference
-- Azimuth rotation shifts the sector beam
-- TX power increase covers more area but may increase inter-cell interference
-- Add neighbor relation: fixes NEIGHBOR_MISSING detected cases
-
-### Answer Format Rules
-- Single answer: exactly one Cn (e.g. C8)
-- Multiple answers: EXACTLY 2 or EXACTLY 4 Cn values, pipe-separated, ascending order (e.g. C3|C7 or C2|C5|C11|C18)
-- NEVER include explanations in the answer field — only the Cn codes
-"""
-
-# ---------------------------------------------------------------------------
-# TRACK B — Skill Context (dynamically loaded, always injected into reasoning agent)
-# ---------------------------------------------------------------------------
-
-_TRACK_B_BASE_RULES = """
-## TRACK B SKILL — IP Network Troubleshooting Domain Rules
-
-### Link Discovery Priority
-1. LLDP neighbor table is the primary source for physical topology (Layer 2 adjacency)
-2. ARP table overrides LLDP when port information conflicts (per competition rules)
-3. Interface description is lowest priority — use only when LLDP and ARP are both absent
-
-### Interface Status Semantics
-| PHY / Protocol | Meaning       | Status field  |
-|----------------|---------------|---------------|
-| up / up        | Fully up      | up            |
-| *down / down   | Admin-down    | admin-down    |
-| down / down    | Physical down | down          |
-
-A port that is admin-down is a configured fault — not a cable failure.
-
-### Routing Fault Categories
-- BLACKHOLE: static route via a down/admin-down interface (traffic drops silently)
-- LOOP: two nodes each route to the other as next-hop for the same prefix
-- MISSING_ROUTE: no route to destination prefix exists in the table
-- ADMIN_DOWN_PORT: critical interface is administratively disabled
-
-### Exact Output Format per Task Type
-TOPOLOGY_RESTORE: one link per line, format exactly:
-  NodeA(PortA)->NodeB(PortB)
-  Use canonical short port names: GE1/0/1, XGE1/0/1, Eth1/0/1
-
-PATH_QUERY: single line, no whitespace around arrows:
-  NodeA->NodeB->NodeC
-
-FAULT_DIAGNOSIS: single line, semicolon-separated:
-  node;port_or_prefix;cause
-  where cause is one of: admin-down, blackhole, missing-route, loop
-
-### General Rules
-- NEVER invent connectivity — only report what is confirmed by tool output
-- If LLDP is empty for a node but ARP shows a neighbour match, use ARP
-- Port canonical forms: GigabitEthernet → GE, Ten-GigabitEthernet → XGE, Ethernet → Eth
-"""
-
-def _load_track_b_skills() -> str:
+def _load_track_a_skills() -> str:
     base_dir = os.path.dirname(os.path.dirname(__file__))
-    skills_dir = os.path.join(base_dir, "skills")
-    
-    parts = [_TRACK_B_BASE_RULES.strip()]
-    
-    if os.path.exists(skills_dir):
-        skill_files = glob.glob(os.path.join(skills_dir, "*", "SKILL.md"))
-        for filepath in sorted(skill_files):
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    # Strip YAML frontmatter if present
-                    if content.startswith("---"):
-                        split_content = content.split("---", 2)
-                        if len(split_content) >= 3:
-                            content = split_content[2].strip()
-                    parts.append(content)
-            except Exception:
-                pass
-                
-    return "\n\n" + "\n\n---\n\n".join(parts) + "\n\n"
+    file_path = os.path.join(base_dir, "skills", "track_a", "wireless_optimization.md")
+    if os.path.exists(file_path):
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return "## TRACK A SKILL\nNo skills found."
 
-TRACK_B_SKILLS = _load_track_b_skills()
+TRACK_A_SKILL = _load_track_a_skills()
+
+# ---------------------------------------------------------------------------
+# TRACK B — Skill Context (dynamically loaded per task, injected into human prompt)
+# ---------------------------------------------------------------------------
+
+def _load_track_b_skills(task_type: str) -> str:
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    
+    # Map typical tasks. Provide default if unknown.
+    task_map = {
+        "TOPOLOGY_RESTORE": "topology_restore.md",
+        "PATH_QUERY": "path_query.md",
+        "FAULT_DIAGNOSIS": "fault_diagnosis.md"
+    }
+    
+    task_key = str(task_type).upper().split('.')[-1]
+    filename = task_map.get(task_key, "fault_diagnosis.md") # Fallback
+    
+    file_path = os.path.join(base_dir, "skills", "track_b", filename)
+    
+    if os.path.exists(file_path):
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return "## TRACK B SKILLS\nNo skills found."
 
 # ---------------------------------------------------------------------------
 # VENDOR_PARSER_SKILL — Centralized CLI format knowledge for ParserAgent
@@ -466,18 +379,16 @@ You extract structured data from network device CLI output.
 Output ONLY a valid JSON array matching the schema provided. No explanation, no markdown, no <think> blocks.
 """
 
-TRACK_B_REASONING_SYSTEM = f"""You are an expert IP network engineer with 15 years of multi-vendor experience.
+TRACK_B_REASONING_SYSTEM = """You are an expert IP network engineer with 15 years of multi-vendor experience.
 
 You will receive pre-computed structured facts (topology, routing, interfaces, faults).
 Your job is to produce the final answer in the exact required format.
-
-{TRACK_B_SKILLS}
 
 CRITICAL RULES:
 - Use ONLY the structured facts provided — never invent links or routes.
 - Think step by step in your reasoning, then output a line:
   ANSWER: <your answer in the exact format>
-- The ANSWER line must use the exact format for the task type (see skill above).
+- The ANSWER line must use the exact format for the task type (as detailed in your rule instructions).
 - The ANSWER line MUST appear AFTER any reasoning — never inside a <think>...</think> block.
 """
 
@@ -642,7 +553,12 @@ def build_track_b_reasoning_prompt(
     if computed_topology:
         topo_block = f"\n## Computed Topology (adjacency)\n{json.dumps(computed_topology, indent=2)}\n"
 
-    return f"""## Question
+    skills = _load_track_b_skills(task_type)
+
+    return f"""## Domain Rules and Answer Format
+{skills}
+
+## Question
 {question}
 
 ## Task Type
