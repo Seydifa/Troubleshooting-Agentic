@@ -74,7 +74,7 @@ class Orchestrator:
         results_a: Dict[str, str] = {}
         results_b: Dict[str, str] = {}
 
-        # Track A — parallel (tool fetches are IO-bound; LLM calls queue in Ollama)
+        # Track A — parallel (tool fetches are IO-bound; LLM calls queue in vLLM)
         if track_a_scenarios:
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {

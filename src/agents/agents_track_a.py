@@ -4,7 +4,7 @@ agents_track_a.py — LangGraph Track A Pipeline (5G Wireless Troubleshooting)
 Pipeline: retrieval_node → feature_extraction_node → rag_retrieval_node
           → analysis_node → validation_node → (END | retry)
 
-Dependencies: langgraph, langchain_ollama, langchain_openai,
+Dependencies: langgraph, langchain_openai,
               state, tools.tools_track_a, rag, llm, prompts.system_prompts
 """
 
@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 def _extract_llm_text(resp) -> str:
     """Return plain text from an LLM response, handling both string and list content.
 
-    Newer versions of langchain-ollama return a list of content blocks when
-    a Qwen3 thinking model is used (one 'thinking' block + one 'text' block).
+    Some LLM backends return a list of content blocks when
+    a Qwen3.5 thinking model is used (one 'thinking' block + one 'text' block).
     This helper extracts only the text blocks and strips any residual
     ``<think>...</think>`` tags from string responses.
     """
@@ -151,8 +151,7 @@ def analysis_node(state: QuestionStateA, *, llm) -> QuestionStateA:
     human_content = build_track_a_analysis_prompt(features, rag_ctx, options, tag)
     if error_msg:
         human_content += f"\n\n⚠️ Previous answer was INVALID: {error_msg}\nPlease correct your answer."
-    # /no_think disables Qwen3 extended thinking — must be on the same line (no preceding newline)
-    human_content = human_content.rstrip() + " /no_think"
+    # Thinking mode is controlled via API params (enable_thinking) — no prompt-level switch needed
 
     messages = [
         SystemMessage(content=TRACK_A_ANALYSIS_SYSTEM),

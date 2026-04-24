@@ -6,7 +6,7 @@ Pipeline: decompose_node → discovery_node → parse_node → compute_node
 
 Handles three task types: TOPOLOGY_RESTORE, PATH_QUERY, FAULT_DIAGNOSIS.
 
-Dependencies: langgraph, langchain_ollama, langchain_openai,
+Dependencies: langgraph, langchain_openai,
               state, tools.parsers_track_b, tools.compute_track_b,
               llm, prompts.system_prompts
 """
@@ -49,8 +49,8 @@ logger = logging.getLogger(__name__)
 def _extract_llm_text(resp) -> str:
     """Return plain text from an LLM response, handling both string and list content.
 
-    Newer versions of langchain-ollama return a list of content blocks when
-    a Qwen3 thinking model is used (one 'thinking' block + one 'text' block).
+    Some LLM backends return a list of content blocks when
+    a Qwen3.5 thinking model is used (one 'thinking' block + one 'text' block).
     This helper extracts only the text blocks and strips any residual
     ``<think>...</think>`` tags from string responses.
     """
@@ -80,8 +80,8 @@ def decompose_node(state: QuestionStateB, *, llm) -> QuestionStateB:
 
     messages = [
         SystemMessage(content=TRACK_B_DECOMPOSE_SYSTEM),
-        # /no_think disables Qwen3 thinking mode — keeps JSON output clean
-        HumanMessage(content=state.get("question", "") + " /no_think"),
+        # Thinking mode disabled via API params (enable_thinking: False) on parser LLM
+        HumanMessage(content=state.get("question", "")),
     ]
     try:
         resp = llm.invoke(messages)
@@ -376,8 +376,7 @@ def reasoning_node(state: QuestionStateB, *, llm) -> QuestionStateB:
         human_content += (
             f"\n\n⚠️ Previous answer was INVALID: {error_msg}\nPlease fix the format."
         )
-    # /no_think disables Qwen3 extended thinking — must be on the same line (no preceding newline)
-    human_content = human_content.rstrip() + " /no_think"
+    # Thinking mode is controlled via API params (enable_thinking) — no prompt-level switch needed
 
     messages = [
         SystemMessage(content=TRACK_B_REASONING_SYSTEM),

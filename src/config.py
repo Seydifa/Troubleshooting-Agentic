@@ -22,7 +22,7 @@ except ImportError:
 class Settings:
     """All runtime configuration, sourced from environment variables."""
 
-    # Runtime environment: "dev" → Ollama, "prod" → OpenRouter
+    # Runtime environment: "dev" → local vLLM, "prod" → OpenRouter
     env: str = field(default_factory=lambda: os.getenv("ENV", "dev"))
 
     # Tool server URL (Track A + B)
@@ -40,16 +40,20 @@ class Settings:
         )
     )
 
-    # Ollama (dev LLM)
-    ollama_base_url: str = field(
-        default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    # vLLM (dev LLM) — OpenAI-compatible API
+    vllm_base_url: str = field(
+        default_factory=lambda: os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+    )
+    vllm_api_key: str = field(
+        default_factory=lambda: os.getenv("VLLM_API_KEY", "EMPTY")
     )
     model_name: str = field(
-        default_factory=lambda: os.getenv("MODEL_NAME", "qwen3.5:0.8b")
+        default_factory=lambda: os.getenv("MODEL_NAME", "Qwen/Qwen3.5-35B-A3B")
     )
     parser_model_name: str = field(
         default_factory=lambda: os.getenv(
-            "PARSER_MODEL_NAME", os.getenv("MODEL_NAME", "qwen3.5:0.8b")
+            "PARSER_MODEL_NAME",
+            os.getenv("MODEL_NAME", "Qwen/Qwen3.5-35B-A3B"),
         )
     )
 
