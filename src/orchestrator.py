@@ -57,6 +57,27 @@ class Orchestrator:
     # Public API
     # ------------------------------------------------------------------
 
+    def _process_track(self, scenarios: List[Dict[str, Any]], run_fn, max_workers: int, track_name: str, results_dict: Dict[str, str], log_method_name: str) -> None:
+        if not scenarios:
+            return
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(run_fn, scenario): scenario.get("scenario_id", "")
+                for scenario in scenarios
+            }
+            for future in as_completed(futures):
+                sid = futures[future]
+                try:
+                    res = future.result()
+                    answer = res[1]
+                    results_dict[sid] = answer
+                    if self._wandb_logger is not None:
+                        log_fn = getattr(self._wandb_logger, log_method_name)
+                        log_fn(*res)
+                except Exception as exc:
+                    logger.error("%s scenario %s failed: %s", track_name, sid, exc)
+                    results_dict[sid] = ""
+
     def run(self, test_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process all scenarios and return merged result rows.
 
@@ -77,49 +98,19 @@ class Orchestrator:
         results_a: Dict[str, str] = {}
         results_b: Dict[str, str] = {}
 
-        # Track A — parallel (tool fetches are IO-bound; LLM calls queue in Ollama)
-        if track_a_scenarios:
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {
-                    executor.submit(self._run_question_a, scenario): scenario.get(
-                        "scenario_id", ""
-                    )
-                    for scenario in track_a_scenarios
-                }
-                for future in as_completed(futures):
-                    sid_a = futures[future]
-                    try:
-                        sid_a, answer, final_state, elapsed, status = future.result()
-                        results_a[sid_a] = answer
-                        if self._wandb_logger is not None:
-                            self._wandb_logger.log_track_a(
-                                sid_a, answer, final_state, elapsed, status
-                            )
-                    except Exception as exc:
-                        logger.error("Track A scenario %s failed: %s", sid_a, exc)
-                        results_a[sid_a] = ""
-
-        # Track B — max 2 concurrent
-        if track_b_scenarios:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = {
-                    executor.submit(self._run_question_b, scenario): scenario.get(
-                        "scenario_id", ""
-                    )
-                    for scenario in track_b_scenarios
-                }
-                for future in as_completed(futures):
-                    sid_b = futures[future]
-                    try:
-                        sid_b, answer, elapsed, status = future.result()
-                        results_b[sid_b] = answer
-                        if self._wandb_logger is not None:
-                            self._wandb_logger.log_track_b(
-                                sid_b, answer, elapsed, status
-                            )
-                    except Exception as exc:
-                        logger.error("Track B scenario %s failed: %s", sid_b, exc)
-                        results_b[sid_b] = ""
+        # Run both tracks concurrently using threads to optimize for run time
+        t_a = threading.Thread(
+            target=self._process_track,
+            args=(track_a_scenarios, self._run_question_a, 4, "Track A", results_a, "log_track_a")
+        )
+        t_b = threading.Thread(
+            target=self._process_track,
+            args=(track_b_scenarios, self._run_question_b, 2, "Track B", results_b, "log_track_b")
+        )
+        t_a.start()
+        t_b.start()
+        t_a.join()
+        t_b.join()
 
         # Merge by scenario_id
         all_ids = sorted(set(list(results_a.keys()) + list(results_b.keys())))

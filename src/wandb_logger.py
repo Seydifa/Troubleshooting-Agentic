@@ -23,6 +23,7 @@ If wandb is not installed or WANDB_API_KEY is unset, all calls silently no-op.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import threading
 from typing import Any, Dict, Optional
@@ -118,12 +119,30 @@ class WandbLogger:
                 config=config or {},
                 reinit=True,
             )
-            # The table is rebuilt on every flush; keep a fresh template here
-            # only for column reference.
+            # Ensure the run is always closed cleanly, even if finish() is
+            # never called explicitly (e.g. notebook cell exception / interrupt).
+            atexit.register(self._atexit_finish)
             logger.info("W&B run started: %s", self._run.url)
         except Exception as exc:
             logger.warning("W&B init failed (%s) — logging disabled.", exc)
             self._enabled = False
+
+    def _atexit_finish(self) -> None:
+        """Called automatically at interpreter exit to prevent 'crashed' status."""
+        if self._enabled and self._run is not None:
+            try:
+                with self._lock:
+                    self._flush_table()
+                self._run.finish()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:
+        """Last-resort cleanup in case atexit doesn't fire (e.g. Jupyter kernel restart)."""
+        try:
+            self._atexit_finish()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Public logging methods
@@ -236,6 +255,9 @@ class WandbLogger:
             logger.info("W&B run finished: %s", self._run.url)
         except Exception as exc:
             logger.warning("W&B finish failed: %s", exc)
+        finally:
+            # Prevent atexit / __del__ from calling finish() a second time.
+            self._run = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -294,7 +316,7 @@ class WandbLogger:
                 logger.debug("W&B scalar log failed: %s", exc)
 
             # Periodic table flush so the table is visible mid-run
-            if idx % self._flush_every == 0:
+            if idx == 1 or idx % self._flush_every == 0:
                 self._flush_table()
 
     def _flush_table(self) -> None:
