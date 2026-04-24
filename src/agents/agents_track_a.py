@@ -127,15 +127,8 @@ def rag_retrieval_node(state: QuestionStateA, *, rag) -> QuestionStateA:
 
     Populates ``state["rag_examples"]``.
     """
-    features = state.get("features", {})
-    fv = build_feature_vector(features)
-    try:
-        context_str = rag.format_context(fv)
-        rag_examples = [context_str] if context_str else []
-    except Exception as exc:
-        logger.warning("rag_retrieval_node failed: %s", exc)
-        rag_examples = []
-    return {**state, "rag_examples": rag_examples}
+    # RAG disabled temporarily for testing per user request.
+    return {**state, "rag_examples": []}
 
 
 def analysis_node(state: QuestionStateA, *, llm) -> QuestionStateA:
