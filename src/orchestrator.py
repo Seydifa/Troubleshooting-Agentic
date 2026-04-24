@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -49,6 +50,8 @@ class Orchestrator:
         self._daily_limit = int(config.get("daily_limit", 1000))
         self._budget_lock = threading.Lock()
         self._budget_used = 0
+        # Optional W&B logger — pass wandb_logger=WandbLogger(...) in config
+        self._wandb_logger = config.get("wandb_logger")
 
     # ------------------------------------------------------------------
     # Public API
@@ -86,8 +89,12 @@ class Orchestrator:
                 for future in as_completed(futures):
                     sid_a = futures[future]
                     try:
-                        _, answer = future.result()
+                        sid_a, answer, final_state, elapsed, status = future.result()
                         results_a[sid_a] = answer
+                        if self._wandb_logger is not None:
+                            self._wandb_logger.log_track_a(
+                                sid_a, answer, final_state, elapsed, status
+                            )
                     except Exception as exc:
                         logger.error("Track A scenario %s failed: %s", sid_a, exc)
                         results_a[sid_a] = ""
@@ -104,8 +111,12 @@ class Orchestrator:
                 for future in as_completed(futures):
                     sid_b = futures[future]
                     try:
-                        _, answer = future.result()
+                        sid_b, answer, elapsed, status = future.result()
                         results_b[sid_b] = answer
+                        if self._wandb_logger is not None:
+                            self._wandb_logger.log_track_b(
+                                sid_b, answer, elapsed, status
+                            )
                     except Exception as exc:
                         logger.error("Track B scenario %s failed: %s", sid_b, exc)
                         results_b[sid_b] = ""
@@ -125,12 +136,12 @@ class Orchestrator:
 
     def run_question_a(self, scenario: Dict[str, Any]) -> str:
         """Public wrapper: run Track A for one scenario, return answer string."""
-        _, answer = self._run_question_a(scenario)
+        _, answer, *_ = self._run_question_a(scenario)
         return answer
 
     def run_question_b(self, scenario: Dict[str, Any]) -> str:
         """Public wrapper: run Track B for one scenario, return answer string."""
-        _, answer = self._run_question_b(scenario)
+        _, answer, *_ = self._run_question_b(scenario)
         return answer
 
     @staticmethod
@@ -155,27 +166,38 @@ class Orchestrator:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _run_question_a(self, scenario: Dict[str, Any]) -> tuple[str, str]:
+    def _run_question_a(
+        self, scenario: Dict[str, Any]
+    ) -> tuple[str, str, Dict[str, Any], float, str]:
         """Run the Track A LangGraph for one scenario.
 
-        Returns (scenario_id, answer_string).
+        Returns (scenario_id, answer, final_state, elapsed_s, status).
         """
         sid = scenario.get("scenario_id", "")
         logger.info("[Track A] Processing %s", sid)
+        final_state: Dict[str, Any] = {}
+        status = "ok"
+        t0 = time.perf_counter()
         try:
             initial_state = make_initial_state_a(scenario)
-            final_state: QuestionStateA = self._graph_a.invoke(initial_state)
+            final_state = self._graph_a.invoke(initial_state)
             answer = final_state.get("answer") or final_state.get("raw_answer", "")
+            if not answer:
+                status = "empty"
         except Exception as exc:
             logger.error("[Track A] Error on %s: %s", sid, exc)
             answer = ""
-        logger.info("[Track A] %s → %s", sid, answer)
-        return sid, answer
+            status = "error"
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            "[Track A] %s → %s  (%.1fs, status=%s)", sid, answer, elapsed, status
+        )
+        return sid, answer, final_state, elapsed, status
 
-    def _run_question_b(self, scenario: Dict[str, Any]) -> tuple[str, str]:
+    def _run_question_b(self, scenario: Dict[str, Any]) -> tuple[str, str, float, str]:
         """Run the Track B LangGraph for one scenario (thread-safe budget check).
 
-        Returns (scenario_id, answer_string).
+        Returns (scenario_id, answer, elapsed_s, status).
         """
         sid = scenario.get("scenario_id", "")
         with self._budget_lock:
@@ -186,13 +208,17 @@ class Orchestrator:
                     self._daily_limit,
                     sid,
                 )
-                return sid, ""
+                return sid, "", 0.0, "skipped"
 
         logger.info("[Track B] Processing %s", sid)
+        status = "ok"
+        t0 = time.perf_counter()
         try:
             initial_state = make_initial_state_b(scenario)
             final_state: QuestionStateB = self._graph_b.invoke(initial_state)
             answer = final_state.get("answer") or final_state.get("raw_answer", "")
+            if not answer:
+                status = "empty"
 
             # Sync budget counter from client
             with self._budget_lock:
@@ -200,6 +226,9 @@ class Orchestrator:
         except Exception as exc:
             logger.error("[Track B] Error on %s: %s", sid, exc)
             answer = ""
-
-        logger.info("[Track B] %s → %s", sid, answer)
-        return sid, answer
+            status = "error"
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            "[Track B] %s → %s  (%.1fs, status=%s)", sid, answer, elapsed, status
+        )
+        return sid, answer, elapsed, status

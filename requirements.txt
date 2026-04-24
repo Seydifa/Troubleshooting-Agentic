@@ -18,6 +18,9 @@ scikit-learn>=1.3.0
 python-dotenv>=1.0.0
 typing-extensions>=4.8.0
 
+# Observability
+wandb>=0.17.0
+
 # HuggingFace (for src/download.py)
 huggingface_hub>=0.20.0
 
