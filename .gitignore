@@ -1,0 +1,32 @@
+# Environment variables (contains secrets — never commit this)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# HuggingFace cache
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Outputs
+result.csv
+*.zip
+
+# Tool cache / RAG artefacts
+*.pkl
+tool_cache*.pkl
+rag_index.pkl
+
+# Raw dataset (large, gated — download via src/download.py)
+data/raw/
+
+# Logs
+*.log
+nohup.out
