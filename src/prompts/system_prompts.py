@@ -63,7 +63,7 @@ delta_db = neighbor_rsrp - serving_rsrp
 
 ### Answer Format Rules
 - Single answer: exactly one Cn (e.g. C8)
-- Multiple answers: 2-4 Cn values, pipe-separated, ascending order (e.g. C3|C7|C11)
+- Multiple answers: EXACTLY 2 or EXACTLY 4 Cn values, pipe-separated, ascending order (e.g. C3|C7 or C2|C5|C11|C18)
 - NEVER include explanations in the answer field — only the Cn codes
 """
 
@@ -483,7 +483,7 @@ def build_track_a_analysis_prompt(
     tag_instruction = (
         "Select EXACTLY ONE option."
         if "single" in tag
-        else "Select 2 to 4 options, pipe-separated, ascending order."
+        else "Select EXACTLY 2 or EXACTLY 4 options (never 1, 3, or more than 4), pipe-separated, ascending order."
     )
 
     return f"""## Scenario Features

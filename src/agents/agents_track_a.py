@@ -229,8 +229,8 @@ def validation_node(state: QuestionStateA) -> QuestionStateA:
         error = f"Codes not in ascending order: {codes}"
     elif "single" in tag and len(codes) != 1:
         error = f"single-answer tag requires exactly 1 code, got {len(codes)}: {codes}"
-    elif "multiple" in tag and not (2 <= len(codes) <= 4):
-        error = f"multiple-answer tag requires 2-4 codes, got {len(codes)}: {codes}"
+    elif "multiple" in tag and len(codes) not in (2, 4):
+        error = f"multiple-answer tag requires exactly 2 or 4 codes, got {len(codes)}: {codes}"
 
     if error is None:
         canonical = "|".join(f"C{n}" for n in sorted(numbers))
