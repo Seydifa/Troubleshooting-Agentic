@@ -46,6 +46,29 @@ from src.llm import get_reasoning_llm
 logger = logging.getLogger(__name__)
 
 
+def _extract_llm_text(resp) -> str:
+    """Return plain text from an LLM response, handling both string and list content.
+
+    Newer versions of langchain-ollama return a list of content blocks when
+    a Qwen3 thinking model is used (one 'thinking' block + one 'text' block).
+    This helper extracts only the text blocks and strips any residual
+    ``<think>...</think>`` tags from string responses.
+    """
+    content = resp.content if hasattr(resp, "content") else str(resp)
+    if isinstance(content, list):
+        parts = [
+            block.get("text", "")
+            if isinstance(block, dict) and block.get("type") == "text"
+            else block
+            if isinstance(block, str)
+            else ""
+            for block in content
+        ]
+        return "\n".join(p for p in parts if p)
+    # Strip <think>...</think> blocks (safety net for thinking-mode leakage)
+    return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+
 # ---------------------------------------------------------------------------
 # Node implementations
 # ---------------------------------------------------------------------------
@@ -62,7 +85,7 @@ def decompose_node(state: QuestionStateB, *, llm) -> QuestionStateB:
     ]
     try:
         resp = llm.invoke(messages)
-        raw = resp.content if hasattr(resp, "content") else str(resp)
+        raw = _extract_llm_text(resp)
         # Strip markdown fences
         raw = re.sub(r"```(?:json)?", "", raw).rstrip("`").strip()
         data = json.loads(raw)
@@ -75,6 +98,14 @@ def decompose_node(state: QuestionStateB, *, llm) -> QuestionStateB:
         task_type = TaskTypeB(task_type_str)
     except ValueError:
         task_type = TaskTypeB.UNKNOWN
+
+    logger.debug(
+        "[Track B] [%s] decompose → task_type=%s  target_node=%r  extra_context=%s",
+        state.get("scenario_id", ""),
+        task_type,
+        data.get("target_node", ""),
+        data.get("extra_context", {}),
+    )
 
     return {
         **state,
@@ -101,11 +132,32 @@ def discovery_node(state: QuestionStateB, *, client: TrackBClient) -> QuestionSt
     def execute(node: str, command: str, key: str):
         nonlocal budget
         if key in tool_cache:
+            logger.debug(
+                "[Track B] [%s] discovery cache hit: %s",
+                state.get("scenario_id", ""),
+                key,
+            )
             return
         if budget >= budget_limit:
             logger.warning("discovery_node: budget exhausted")
             return
+        logger.debug(
+            "[Track B] [%s] discovery executing: node=%r  cmd=%r  (budget %d/%d)",
+            state.get("scenario_id", ""),
+            node,
+            command,
+            budget,
+            budget_limit,
+        )
         raw, vendor, cmd_type = client.execute(task_id, node, command)
+        logger.debug(
+            "[Track B] [%s] discovery result: key=%s  vendor=%s  cmd_type=%s  len=%d",
+            state.get("scenario_id", ""),
+            key,
+            vendor,
+            cmd_type,
+            len(raw),
+        )
         tool_cache[key] = {
             "raw_output": raw,
             "vendor": vendor,
@@ -179,6 +231,13 @@ def parse_node(state: QuestionStateB, *, parser_agent: ParserAgent) -> QuestionS
         node = entry.get("node", "")
         command_type = entry.get("command_type", "")
         tagged = [{**row, "_node": node} for row in rows]
+        logger.debug(
+            "[Track B] [%s] parse_node: node=%r  cmd_type=%s  rows=%d",
+            state.get("scenario_id", ""),
+            node,
+            command_type,
+            len(tagged),
+        )
 
         if command_type == "lldp_neighbors":
             topology_facts.extend(tagged)
@@ -188,6 +247,15 @@ def parse_node(state: QuestionStateB, *, parser_agent: ParserAgent) -> QuestionS
             interface_facts.extend(tagged)
         elif command_type == "arp_table":
             arp_facts.extend(tagged)
+
+    logger.debug(
+        "[Track B] [%s] parse_node totals — topo=%d  rt=%d  iface=%d  arp=%d",
+        state.get("scenario_id", ""),
+        len(topology_facts),
+        len(routing_facts),
+        len(interface_facts),
+        len(arp_facts),
+    )
 
     return {
         **state,
@@ -273,6 +341,14 @@ def compute_node(state: QuestionStateB) -> QuestionStateB:
             routing_facts=rt_by_node.get(faulty, []),
         )
 
+    logger.debug(
+        "[Track B] [%s] compute_node — topology_nodes=%s  path=%s  faults=%s",
+        state.get("scenario_id", ""),
+        list(full_graph.keys()) if isinstance(full_graph, dict) else full_graph,
+        computed_path,
+        fault_candidates,
+    )
+
     return {
         **state,
         "computed_topology": full_graph,
@@ -300,23 +376,45 @@ def reasoning_node(state: QuestionStateB, *, llm) -> QuestionStateB:
         human_content += (
             f"\n\n⚠️ Previous answer was INVALID: {error_msg}\nPlease fix the format."
         )
+    # /no_think disables Qwen3 extended thinking — prevents 500 s+ think blocks
+    human_content += " /no_think"
 
     messages = [
         SystemMessage(content=TRACK_B_REASONING_SYSTEM),
         HumanMessage(content=human_content),
     ]
+
+    logger.debug(
+        "[Track B] [%s] reasoning_node prompt (retry=%d):\n%s",
+        state.get("scenario_id", ""),
+        state.get("retry_count", 0),
+        human_content,
+    )
+
     try:
         resp = llm.invoke(messages)
-        raw_text = resp.content if hasattr(resp, "content") else str(resp)
+        raw_text = _extract_llm_text(resp)
     except Exception as exc:
         logger.error("reasoning_node LLM call failed: %s", exc)
         raw_text = ""
+
+    logger.debug(
+        "[Track B] [%s] LLM raw response:\n%s",
+        state.get("scenario_id", ""),
+        raw_text,
+    )
 
     raw_answer = raw_text
     for line in reversed(raw_text.splitlines()):
         if "ANSWER:" in line.upper():
             raw_answer = line.split("ANSWER:", 1)[-1].strip()
             break
+
+    logger.debug(
+        "[Track B] [%s] extracted raw_answer: %r",
+        state.get("scenario_id", ""),
+        raw_answer,
+    )
 
     return {
         **state,
@@ -355,8 +453,19 @@ def format_validation_node(state: QuestionStateB) -> QuestionStateB:
             error = f"Invalid FAULT_DIAGNOSIS format: '{raw}'"
 
     if error is None:
+        logger.debug(
+            "[Track B] [%s] validation PASSED → answer: %r",
+            state.get("scenario_id", ""),
+            raw,
+        )
         return {**state, "answer": raw, "error": None}
     else:
+        logger.debug(
+            "[Track B] [%s] validation FAILED (retry %d): %s",
+            state.get("scenario_id", ""),
+            retry + 1,
+            error,
+        )
         return {**state, "error": error, "retry_count": retry + 1}
 
 

@@ -282,6 +282,15 @@ class ParserAgent:
             raw_text = (
                 response.content if hasattr(response, "content") else str(response)
             )
+            if isinstance(raw_text, list):
+                raw_text = "\n".join(
+                    b.get("text", "")
+                    if isinstance(b, dict) and b.get("type") == "text"
+                    else b
+                    if isinstance(b, str)
+                    else ""
+                    for b in raw_text
+                )
             return _extract_json_list(raw_text)
         except Exception as exc:
             logger.warning("ParserAgent.parse failed: %s", exc)
@@ -339,10 +348,21 @@ class ParserAgent:
 
         try:
             responses = self._llm.batch(message_batches)
-            return [
-                _extract_json_list(r.content if hasattr(r, "content") else str(r))
-                for r in responses
-            ]
+
+            def _resp_text(r) -> str:
+                c = r.content if hasattr(r, "content") else str(r)
+                if isinstance(c, list):
+                    return "\n".join(
+                        b.get("text", "")
+                        if isinstance(b, dict) and b.get("type") == "text"
+                        else b
+                        if isinstance(b, str)
+                        else ""
+                        for b in c
+                    )
+                return c
+
+            return [_extract_json_list(_resp_text(r)) for r in responses]
         except Exception as exc:
             logger.warning(
                 "ParserAgent.parse_batch failed: %s — falling back to sequential", exc

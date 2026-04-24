@@ -32,6 +32,29 @@ from src.llm import get_reasoning_llm
 logger = logging.getLogger(__name__)
 
 
+def _extract_llm_text(resp) -> str:
+    """Return plain text from an LLM response, handling both string and list content.
+
+    Newer versions of langchain-ollama return a list of content blocks when
+    a Qwen3 thinking model is used (one 'thinking' block + one 'text' block).
+    This helper extracts only the text blocks and strips any residual
+    ``<think>...</think>`` tags from string responses.
+    """
+    content = resp.content if hasattr(resp, "content") else str(resp)
+    if isinstance(content, list):
+        parts = [
+            block.get("text", "")
+            if isinstance(block, dict) and block.get("type") == "text"
+            else block
+            if isinstance(block, str)
+            else ""
+            for block in content
+        ]
+        return "\n".join(p for p in parts if p)
+    # Strip <think>...</think> blocks (safety net for thinking-mode leakage)
+    return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+
 # ---------------------------------------------------------------------------
 # Node implementations
 # ---------------------------------------------------------------------------
@@ -85,6 +108,13 @@ def feature_extraction_node(state: QuestionStateA) -> QuestionStateA:
     features: Dict[str, Any] = extract_features_from_rows(up_rows, config_rows)
     problem_type_str = classify_problem_type(features)
 
+    logger.debug(
+        "[Track A] [%s] features = %s  problem_type = %s",
+        state.get("scenario_id", ""),
+        features,
+        problem_type_str,
+    )
+
     return {
         **state,
         "features": features,
@@ -121,24 +151,52 @@ def analysis_node(state: QuestionStateA, *, llm) -> QuestionStateA:
     human_content = build_track_a_analysis_prompt(features, rag_ctx, options, tag)
     if error_msg:
         human_content += f"\n\n⚠️ Previous answer was INVALID: {error_msg}\nPlease correct your answer."
+    # /no_think disables Qwen3 extended thinking — prevents 500 s+ think blocks
+    human_content += " /no_think"
 
     messages = [
         SystemMessage(content=TRACK_A_ANALYSIS_SYSTEM),
         HumanMessage(content=human_content),
     ]
+
+    logger.debug(
+        "[Track A] [%s] analysis_node prompt (retry=%d):\n%s",
+        state.get("scenario_id", ""),
+        state.get("retry_count", 0),
+        human_content,
+    )
+
     try:
         resp = llm.invoke(messages)
-        raw_text = resp.content if hasattr(resp, "content") else str(resp)
+        raw_text = _extract_llm_text(resp)
     except Exception as exc:
         logger.error("analysis_node LLM call failed: %s", exc)
         raw_text = ""
 
-    # Extract ANSWER: line
-    raw_answer = raw_text
+    logger.debug(
+        "[Track A] [%s] LLM raw response:\n%s",
+        state.get("scenario_id", ""),
+        raw_text,
+    )
+
+    # 1. Try to find explicit ANSWER: label (last occurrence wins)
+    raw_answer = ""
     for line in reversed(raw_text.splitlines()):
         if "ANSWER:" in line.upper():
             raw_answer = line.split("ANSWER:", 1)[-1].strip()
             break
+    # 2. Fallback: if no ANSWER: label, pick the last Cn codes found in the text
+    if not raw_answer:
+        all_codes = re.findall(r"C\d+", raw_text)
+        if all_codes:
+            unique = sorted(set(int(c[1:]) for c in all_codes))
+            raw_answer = "|".join(f"C{n}" for n in unique)
+
+    logger.debug(
+        "[Track A] [%s] extracted raw_answer: %r",
+        state.get("scenario_id", ""),
+        raw_answer,
+    )
 
     return {
         **state,
@@ -176,8 +234,19 @@ def validation_node(state: QuestionStateA) -> QuestionStateA:
 
     if error is None:
         canonical = "|".join(f"C{n}" for n in sorted(numbers))
+        logger.debug(
+            "[Track A] [%s] validation PASSED → answer: %s",
+            state.get("scenario_id", ""),
+            canonical,
+        )
         return {**state, "answer": canonical, "error": None}
     else:
+        logger.debug(
+            "[Track A] [%s] validation FAILED (retry %d): %s",
+            state.get("scenario_id", ""),
+            state.get("retry_count", 0) + 1,
+            error,
+        )
         return {
             **state,
             "error": error,
