@@ -47,7 +47,11 @@ If `serving_rsrp + threshold_db > neighbor_rsrp`, the handover has NOT triggered
 - **DO NOT blindly copy answer combinations** from the "Similar Past Scenarios".
 - Tabular past examples only show historically chosen combinations. Your task is to evaluate each of the *Candidate Options* provided in the current prompt individually. 
 - You MUST evaluate each possible solution and select a subset (or one) from all possibilities that specifically fix the current scenario's faults.
-- Even if a RAG example shows "C1|C15", if the candidate list provides options where "C1" and "C8" are the correct logical resolutions based on current features, output exactly that combination (e.g., `C1|C8`).
+- If RAG provides examples such as:
+  Example 1: RSRP -84.3... Answer: C1|C15.
+  Example 2: RSRP -98.4... Answer: C1|C21.
+  Example 3: RSRP -83.2... Answer: C5|C8.
+  You must decompose the solutions into the individual diagnostics (e.g., C1, C5, C8, C15, C21). Then, evaluate these options against the current facts and select the exact combination that satisfies your reasoning (e.g., Output: `C1|C8`).
 
 ### Answer Format Rules
 - Follow the prompt exactly. Do not provide extraneous symbols.
