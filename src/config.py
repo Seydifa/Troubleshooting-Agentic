@@ -45,11 +45,11 @@ class Settings:
         default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     )
     model_name: str = field(
-        default_factory=lambda: os.getenv("MODEL_NAME", "qwen3.5:0.8b")
+        default_factory=lambda: os.getenv("MODEL_NAME", "qwen3.5:35b-a3b")
     )
     parser_model_name: str = field(
         default_factory=lambda: os.getenv(
-            "PARSER_MODEL_NAME", os.getenv("MODEL_NAME", "qwen3.5:0.8b")
+            "PARSER_MODEL_NAME", os.getenv("MODEL_NAME", "qwen3.5:35b-a3b")
         )
     )
 

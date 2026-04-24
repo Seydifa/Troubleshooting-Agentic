@@ -6,7 +6,7 @@ Reads config from the ``src.config`` module (accessed dynamically so that
 notebook Cell 4 setting patches are always visible).
 
 Two public factories:
-- ``get_reasoning_llm()``  — analysis/reasoning agents (Qwen3 thinking mode)
+- ``get_reasoning_llm()``  — analysis/reasoning agents (Qwen3.5 thinking mode)
 - ``get_parser_llm()``     — JSON-only parsing agents (non-thinking, temperature=0)
 
 Both functions return a **module-level singleton** — the same instance is
@@ -24,8 +24,8 @@ from typing import Any
 
 import src.config as _config  # module reference — sees live settings patches
 
-# Fallback prod model when MODEL_NAME is not set in environment
-_PROD_MODEL = "Qwen/Qwen3-235B-A22B"
+# Competition model — Qwen3.5-35B-A3B (mandatory, no substitution allowed)
+_PROD_MODEL = "Qwen/Qwen3.5-35B-A3B"
 
 # Module-level singletons — shared by every agent
 _reasoning_llm: Any = None
@@ -35,7 +35,7 @@ _parser_llm: Any = None
 def get_reasoning_llm() -> Any:
     """Return the shared reasoning LLM (lazy-initialised singleton).
 
-    - dev  → ChatOllama  (Qwen3 thinking mode: temp=0.6, top_p=0.95, top_k=20)
+    - dev  → ChatOllama  (Qwen3.5: temp=0.6, top_p=0.95, top_k=20)
     - prod → ChatOpenAI  (OpenRouter, temp=0.3)
     """
     global _reasoning_llm
@@ -55,7 +55,7 @@ def get_reasoning_llm() -> Any:
             _reasoning_llm = ChatOllama(
                 model=_config.settings.model_name,
                 base_url=_config.settings.ollama_base_url,
-                # Disable Qwen3 extended thinking at the API level
+                # Disable Qwen3.5 extended thinking at the API level
                 think=False,
                 temperature=0.6,
                 top_p=0.95,
@@ -67,7 +67,7 @@ def get_reasoning_llm() -> Any:
 def get_parser_llm() -> Any:
     """Return the shared parser LLM (lazy-initialised singleton).
 
-    JSON-only agents — thinking mode disabled via /no_think in the prompt.
+    JSON-only agents — thinking mode disabled via think=False.
 
     - dev  → ChatOllama  (PARSER_MODEL_NAME, temperature=0 for determinism)
     - prod → ChatOpenAI  (OpenRouter, temperature=0, max_tokens=1024)
@@ -90,7 +90,7 @@ def get_parser_llm() -> Any:
             _parser_llm = ChatOllama(
                 model=_config.settings.parser_model_name,
                 base_url=_config.settings.ollama_base_url,
-                # Qwen3 non-thinking mode: temperature=0 for JSON determinism
+                # Qwen3.5 non-thinking mode: temperature=0 for JSON determinism
                 temperature=0,
             )
     return _parser_llm
