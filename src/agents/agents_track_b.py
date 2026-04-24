@@ -25,7 +25,7 @@ from src.state import QuestionStateB, TaskTypeB
 from src.tools.parsers_track_b import (
     ParserAgent,
     TrackBClient,
-    parse_cli_output,
+    batch_parse_cli_outputs,
 )
 from src.tools.compute_track_b import (
     build_topology_graph,
@@ -146,40 +146,48 @@ def discovery_node(state: QuestionStateB, *, client: TrackBClient) -> QuestionSt
 
 
 def parse_node(state: QuestionStateB, *, parser_agent: ParserAgent) -> QuestionStateB:
-    """Pure LLM iteration — normalize each cached raw output through ParserAgent.
+    """Batch LLM iteration — normalise all cached CLI outputs in two llm.batch() passes.
 
+    Replaces the old sequential for-loop (N × llm.invoke) with at most two
+    llm.batch() calls: one first-pass for all entries, then a retry pass only
+    for entries that failed schema validation.
     No API calls. Safe to retry independently of discovery.
     """
     tool_cache = state.get("tool_cache", {})
+
+    entries_to_parse = [
+        entry for entry in tool_cache.values() if entry.get("raw_output")
+    ]
+
+    if not entries_to_parse:
+        return {
+            **state,
+            "topology_facts": [],
+            "routing_facts": [],
+            "interface_facts": [],
+            "arp_facts": [],
+        }
+
+    all_results = batch_parse_cli_outputs(entries_to_parse, parser_agent)
 
     topology_facts: List[Dict[str, Any]] = []
     routing_facts: List[Dict[str, Any]] = []
     interface_facts: List[Dict[str, Any]] = []
     arp_facts: List[Dict[str, Any]] = []
 
-    for cache_key, entry in tool_cache.items():
-        raw_output = entry.get("raw_output", "")
-        vendor = entry.get("vendor", "unknown")
-        command_type = entry.get("command_type", "")
+    for entry, rows in zip(entries_to_parse, all_results):
         node = entry.get("node", "")
-
-        if not raw_output:
-            continue
-
-        parsed = parse_cli_output(raw_output, vendor, command_type, parser_agent)
-
-        # Tag each entry with the source node (needed for graph building)
-        for row in parsed:
-            row["_node"] = node
+        command_type = entry.get("command_type", "")
+        tagged = [{**row, "_node": node} for row in rows]
 
         if command_type == "lldp_neighbors":
-            topology_facts.extend(parsed)
+            topology_facts.extend(tagged)
         elif command_type == "routing_table":
-            routing_facts.extend(parsed)
+            routing_facts.extend(tagged)
         elif command_type == "interface_brief":
-            interface_facts.extend(parsed)
+            interface_facts.extend(tagged)
         elif command_type == "arp_table":
-            arp_facts.extend(parsed)
+            arp_facts.extend(tagged)
 
     return {
         **state,

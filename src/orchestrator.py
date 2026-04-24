@@ -74,10 +74,23 @@ class Orchestrator:
         results_a: Dict[str, str] = {}
         results_b: Dict[str, str] = {}
 
-        # Track A — sequential
-        for scenario in track_a_scenarios:
-            sid, answer = self._run_question_a(scenario)
-            results_a[sid] = answer
+        # Track A — parallel (tool fetches are IO-bound; LLM calls queue in Ollama)
+        if track_a_scenarios:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {
+                    executor.submit(self._run_question_a, scenario): scenario.get(
+                        "scenario_id", ""
+                    )
+                    for scenario in track_a_scenarios
+                }
+                for future in as_completed(futures):
+                    sid_a = futures[future]
+                    try:
+                        _, answer = future.result()
+                        results_a[sid_a] = answer
+                    except Exception as exc:
+                        logger.error("Track A scenario %s failed: %s", sid_a, exc)
+                        results_a[sid_a] = ""
 
         # Track B — max 2 concurrent
         if track_b_scenarios:

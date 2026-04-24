@@ -287,6 +287,68 @@ class ParserAgent:
             logger.warning("ParserAgent.parse failed: %s", exc)
             return []
 
+    def parse_batch(
+        self,
+        contexts: List[Dict[str, str]],
+        error_feedbacks: Optional[List[str]] = None,
+    ) -> List[List[Dict[str, Any]]]:
+        """Batch-parse multiple CLI outputs in a single ``llm.batch()`` call.
+
+        Parameters
+        ----------
+        contexts : list[dict]
+            Each element is the output of ``VendorContextBuilder.build()``.
+        error_feedbacks : list[str], optional
+            Per-context retry error messages. Defaults to empty strings.
+
+        Returns
+        -------
+        list[list[dict]]
+            One parsed result list per input context.
+        """
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from src.prompts.system_prompts import (
+            TRACK_B_PARSER_SYSTEM,
+            build_parser_prompt,
+        )
+
+        if not contexts:
+            return []
+        if error_feedbacks is None:
+            error_feedbacks = [""] * len(contexts)
+
+        message_batches: List[list] = []
+        for context, error_fb in zip(contexts, error_feedbacks):
+            human_content = build_parser_prompt(
+                raw_output=context["raw_output"],
+                vendor=context["vendor"],
+                command_type=context["command_type"],
+            )
+            if error_fb:
+                human_content += (
+                    f"\n\nPrevious attempt failed validation:\n{error_fb}"
+                    "\nPlease fix and retry."
+                )
+            human_content += " /no_think"
+            message_batches.append(
+                [
+                    SystemMessage(content=TRACK_B_PARSER_SYSTEM),
+                    HumanMessage(content=human_content),
+                ]
+            )
+
+        try:
+            responses = self._llm.batch(message_batches)
+            return [
+                _extract_json_list(r.content if hasattr(r, "content") else str(r))
+                for r in responses
+            ]
+        except Exception as exc:
+            logger.warning(
+                "ParserAgent.parse_batch failed: %s — falling back to sequential", exc
+            )
+            return [self.parse(ctx, ef) for ctx, ef in zip(contexts, error_feedbacks)]
+
 
 def _extract_json_list(text: str) -> List[Dict[str, Any]]:
     """Extract the first JSON array from an LLM response string."""
@@ -403,3 +465,68 @@ def parse_cli_output(
     parsed2 = parser_agent.parse(context, error_feedback=error_msg)
     validated2 = SchemaValidator.validate(parsed2, command_type)
     return validated2  # Returns [] sentinel if still invalid
+
+
+def batch_parse_cli_outputs(
+    entries: List[Dict[str, Any]],
+    parser_agent: Optional[ParserAgent] = None,
+) -> List[List[Dict[str, Any]]]:
+    """Batch equivalent of ``parse_cli_output`` for multiple entries.
+
+    Sends all first-pass parse requests in a single ``llm.batch()`` call, then
+    retries only the entries that fail schema validation in a second batch call.
+    This replaces a sequential for-loop of N×``llm.invoke()`` calls with at
+    most 2 ``llm.batch()`` calls regardless of N.
+
+    Parameters
+    ----------
+    entries : list[dict]
+        Each dict must have keys: ``raw_output``, ``vendor``, ``command_type``.
+    parser_agent : ParserAgent, optional
+        Shared instance. A new one is created if not supplied.
+
+    Returns
+    -------
+    list[list[dict]]
+        One validated result list per entry (empty list on failure).
+    """
+    if parser_agent is None:
+        parser_agent = ParserAgent()
+    if not entries:
+        return []
+
+    contexts = [
+        VendorContextBuilder.build(
+            e.get("vendor", "unknown"),
+            e.get("command_type", ""),
+            e.get("raw_output", ""),
+        )
+        for e in entries
+    ]
+
+    # ── First pass: batch parse ───────────────────────────────────────────────
+    first_pass = parser_agent.parse_batch(contexts)
+    validated = [
+        SchemaValidator.validate(parsed, ctx["command_type"])
+        for parsed, ctx in zip(first_pass, contexts)
+    ]
+
+    # ── Second pass: retry only failures ─────────────────────────────────────
+    retry_indices = [i for i, v in enumerate(validated) if not v]
+    if retry_indices:
+        retry_contexts = [contexts[i] for i in retry_indices]
+        retry_errors = [
+            (
+                f"Output did not match schema for {contexts[i]['command_type']}. "
+                f"Required keys: {_REQUIRED_KEYS.get(contexts[i]['command_type'], [])}. "
+                f"Got: {first_pass[i][:2] if first_pass[i] else 'empty list'}."
+            )
+            for i in retry_indices
+        ]
+        retry_results = parser_agent.parse_batch(retry_contexts, retry_errors)
+        for pos, idx in enumerate(retry_indices):
+            validated[idx] = SchemaValidator.validate(
+                retry_results[pos], contexts[idx]["command_type"]
+            )
+
+    return validated

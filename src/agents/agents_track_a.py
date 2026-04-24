@@ -38,10 +38,13 @@ logger = logging.getLogger(__name__)
 
 
 def retrieval_node(state: QuestionStateA, *, client: TrackAClient) -> QuestionStateA:
-    """Fetch ALL tool-server data upfront. No LLM.
+    """Fetch ALL tool-server data upfront in parallel. No LLM.
 
-    Populates ``state["tool_cache"]``.
+    Issues the three independent HTTP calls concurrently so IO wait does not
+    compound.  Populates ``state["tool_cache"]``.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     sid = state.get("scenario_id", "")
     cache = dict(state.get("tool_cache", {}))
 
@@ -50,13 +53,22 @@ def retrieval_node(state: QuestionStateA, *, client: TrackAClient) -> QuestionSt
         "user_plane_data": client.user_plane_data,
         "config_data": client.config_data,
     }
-    for name, fn in endpoints.items():
-        if name not in cache:
-            try:
-                cache[name] = fn(sid)
-            except Exception as exc:
-                logger.warning("retrieval_node: %s failed for %s: %s", name, sid, exc)
-                cache[name] = {}
+    missing = {name: fn for name, fn in endpoints.items() if name not in cache}
+    if not missing:
+        return {**state, "tool_cache": cache}
+
+    def _fetch(name: str, fn) -> tuple[str, dict]:
+        try:
+            return name, fn(sid)
+        except Exception as exc:
+            logger.warning("retrieval_node: %s failed for %s: %s", name, sid, exc)
+            return name, {}
+
+    with ThreadPoolExecutor(max_workers=len(missing)) as executor:
+        futures = {executor.submit(_fetch, n, f): n for n, f in missing.items()}
+        for future in as_completed(futures):
+            name, result = future.result()
+            cache[name] = result
 
     return {**state, "tool_cache": cache}
 
