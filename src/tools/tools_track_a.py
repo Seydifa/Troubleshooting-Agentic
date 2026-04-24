@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import pickle
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -381,6 +383,15 @@ def extract_features_from_rows(
         serving_rsrp, best_nb_rsrp, offset_05db, hyst_05db
     )
 
+    # ---- forensic report (deterministic rule-based) ----
+    forensic_report = ""
+    try:
+        cfg_df = pd.DataFrame(config_rows) if config_rows else pd.DataFrame()
+        forensic_report = NetworkForensicAnalyzer(df, cfg_df).run_analysis()
+    except Exception as exc:
+        logger.warning("NetworkForensicAnalyzer failed: %s", exc)
+        forensic_report = f"Forensic analysis unavailable: {exc}"
+
     return {
         **tput_stats,
         "serving_rsrp": serving_rsrp,
@@ -389,6 +400,7 @@ def extract_features_from_rows(
         "neighbor_missing": neighbor_missing,
         "pci_stable": True,
         "pdcch_symbol_count": pdcch_sym,
+        "forensic_report": forensic_report,
         **ho_info,
     }
 
@@ -535,3 +547,421 @@ def build_feature_vector(features: Dict[str, Any]) -> List[float]:
         neighbor_miss,
         neighbor_count,
     ]
+
+
+# ---------------------------------------------------------------------------
+# NetworkForensicAnalyzer — deterministic root-cause analysis
+# ---------------------------------------------------------------------------
+
+
+class NetworkForensicAnalyzer:
+    """Deterministic 5G drive-test forensic analyzer.
+
+    Diagnoses eight root-cause categories from drive-test and engineering data
+    and returns a structured text report.  Internal verdict labels deliberately
+    use descriptive names (SPEED, RESOURCE, MOD30, …) to avoid clashing with
+    the C1-Cn answer option IDs used in the competition format.
+
+    Parameters
+    ----------
+    drive_df : pd.DataFrame
+        User-plane measurement rows (from /user-plane-data/json endpoint).
+    eng_df : pd.DataFrame
+        Engineering / config rows (from /config-data/json endpoint).
+    """
+
+    # Column name constants
+    TPUT_COL = "5G KPI PCell Layer2 MAC DL Throughput [Mbps]"
+    RSRP_COL = "5G KPI PCell RF Serving SS-RSRP [dBm]"
+    SINR_COL = "5G KPI PCell RF Serving SS-SINR [dB]"
+    PCI_COL = "5G KPI PCell RF Serving PCI"
+    SPEED_COL = "GPS Speed (km/h)"
+    RB_COL = "5G KPI PCell Layer1 DL RB Num (Including 0)"
+    NB_RSRP_COL = "Measurement PCell Neighbor Cell Top Set(Cell Level) Top 1 Filtered Tx BRSRP [dBm]"
+    NB_PCI_COL = "Measurement PCell Neighbor Cell Top Set(Cell Level) Top 1 PCI"
+    TS_COL = "Timestamp"
+    LAT_COL = "Latitude"
+    LON_COL = "Longitude"
+
+    HIGH_TP = 800.0
+    LOW_TP = 600.0
+    SPEED_THR = 40.0
+    DIST_THR = 1000.0  # metres – overshoot limit
+
+    def __init__(self, drive_df: pd.DataFrame, eng_df: pd.DataFrame) -> None:
+        self.df = drive_df.copy()
+        self.eng_df = eng_df.copy()
+        # Strip whitespace from column headers
+        self.df.columns = self.df.columns.str.strip()
+        self.eng_df.columns = self.eng_df.columns.str.strip()
+
+        # Numeric coercions for drive-test columns that exist
+        for col in [
+            self.TPUT_COL,
+            self.PCI_COL,
+            self.RSRP_COL,
+            self.SINR_COL,
+            self.SPEED_COL,
+            self.RB_COL,
+            self.NB_RSRP_COL,
+            self.NB_PCI_COL,
+            self.LAT_COL,
+            self.LON_COL,
+        ]:
+            if col in self.df.columns:
+                self.df[col] = pd.to_numeric(self.df[col], errors="coerce")
+
+        # Numeric PCI in engineering table
+        if "PCI" in self.eng_df.columns:
+            self.eng_df["PCI"] = pd.to_numeric(self.eng_df["PCI"], errors="coerce")
+
+        # Drop rows without throughput or timestamp
+        if self.TPUT_COL in self.df.columns and self.TS_COL in self.df.columns:
+            self.df = self.df.dropna(subset=[self.TPUT_COL, self.TS_COL])
+
+    # ------------------------------------------------------------------
+    # Geometry helpers (identical math to server.py)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """Return distance in metres between two lat/lon points."""
+        if any(math.isnan(v) for v in (lat1, lon1, lat2, lon2)):
+            return float("nan")
+        R = 6_371_000.0
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        a = (
+            math.sin(dphi / 2) ** 2
+            + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+        )
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    @staticmethod
+    def _vertical_beamwidth(scenario: Any) -> float:
+        """Return vertical beamwidth (°) from a Beam Scenario string."""
+        if pd.isna(scenario):
+            return 6.0
+        s = str(scenario).upper().strip()
+        if "DEFAULT" in s:
+            return 6.0
+        if "SCENARIO_" in s:
+            try:
+                num = int("".join(filter(str.isdigit, s.split("SCENARIO_")[-1])))
+                if num <= 5:
+                    return 6.0
+                if num <= 11:
+                    return 12.0
+                return 25.0
+            except (ValueError, IndexError):
+                return 6.0
+        return 6.0
+
+    @staticmethod
+    def _digital_tilt(val: Any) -> float:
+        if pd.isna(val):
+            return 0.0
+        return 6.0 if float(val) == 255 else float(val)
+
+    # ------------------------------------------------------------------
+    # Core analysis
+    # ------------------------------------------------------------------
+
+    def _serving_cell_name(self) -> str:
+        """Return 'gNodeBID_CellID (PCI nnn)' for the dominant serving PCI, or empty string."""
+        if self.TPUT_COL not in self.df.columns or self.df.empty:
+            return ""
+        low_df = self.df[self.df[self.TPUT_COL] < self.LOW_TP]
+        if low_df.empty or self.PCI_COL not in self.df.columns:
+            return ""
+        pci_mode = low_df[self.PCI_COL].mode()
+        if pci_mode.empty:
+            return ""
+        pci = pci_mode.iloc[0]
+        if "gNodeB ID" in self.eng_df.columns and "Cell ID" in self.eng_df.columns:
+            rows = self.eng_df[self.eng_df["PCI"] == pci]
+            if not rows.empty:
+                gnb = rows.iloc[0]["gNodeB ID"]
+                cid = rows.iloc[0]["Cell ID"]
+                return f"{gnb}_{cid} (PCI {int(pci)})"
+        return f"PCI {int(pci)}"
+
+    def run_analysis(self) -> str:
+        """Run all forensic checks and return a structured text report."""
+        if self.TPUT_COL not in self.df.columns or self.df.empty:
+            return "FORENSIC REPORT: Insufficient data for analysis."
+
+        low_df = self.df[self.df[self.TPUT_COL] < self.LOW_TP]
+        high_df = self.df[self.df[self.TPUT_COL] > self.HIGH_TP]
+
+        serving_cell = self._serving_cell_name()
+        report: List[str] = ["### NETWORK FORENSIC REPORT ###"]
+        if serving_cell:
+            report.append(f"Dominant Serving Cell (low-TP window): {serving_cell}")
+
+        if low_df.empty:
+            report.append(
+                "No low-throughput samples (<600 Mbps) detected. Network appears healthy."
+            )
+            return "\n".join(report)
+
+        # ── Section 1: Mobility & Resources ──────────────────────────
+        report.append("\n--- 1. Mobility & Resources ---")
+        self._check_speed(low_df, high_df, report)
+        self._check_resources(low_df, report)
+
+        # ── Section 2: Coverage & Geometry ───────────────────────────
+        report.append("\n--- 2. Coverage & Geometry ---")
+        self._check_geometry(low_df, report)
+
+        # ── Section 3: Interference & Neighbors ──────────────────────
+        report.append("\n--- 3. Interference & Neighbors ---")
+        self._check_handovers(low_df, report)
+        self._check_mod30(low_df, report)
+        self._check_neighbors(low_df, report)
+
+        return "\n".join(report)
+
+    # ------------------------------------------------------------------
+    # Section helpers
+    # ------------------------------------------------------------------
+
+    def _check_speed(
+        self, low_df: pd.DataFrame, high_df: pd.DataFrame, report: List[str]
+    ) -> None:
+        if self.SPEED_COL not in self.df.columns:
+            report.append("Speed Analysis [SPEED]: column missing, skipped.")
+            return
+        avg_low = low_df[self.SPEED_COL].mean()
+        avg_high = high_df[self.SPEED_COL].mean() if not high_df.empty else 0.0
+        verdict = (
+            "FAIL (Doppler/mobility effect)"
+            if pd.notna(avg_low) and avg_low > self.SPEED_THR
+            else "PASS"
+        )
+        if verdict == "FAIL" and pd.notna(avg_high) and avg_high < self.SPEED_THR:
+            verdict += " — strong correlation: high speed coincides with low TP"
+        report.append(f"Speed Analysis [SPEED]:")
+        report.append(f"  Low-TP avg speed : {avg_low:.1f} km/h")
+        report.append(f"  High-TP avg speed: {avg_high:.1f} km/h")
+        report.append(f"  Verdict          : {verdict}")
+
+    def _check_resources(self, low_df: pd.DataFrame, report: List[str]) -> None:
+        if self.RB_COL not in self.df.columns:
+            report.append("Resource Analysis [RESOURCE]: column missing, skipped.")
+            return
+        avg_rb = low_df[self.RB_COL].mean()
+        verdict = (
+            "FAIL (RBs < 160, resource starvation)"
+            if pd.notna(avg_rb) and avg_rb < 160
+            else "PASS (RBs ≥ 160)"
+        )
+        rb_str = f"{avg_rb:.0f}" if pd.notna(avg_rb) else "N/A"
+        report.append(f"Resource Analysis [RESOURCE]:")
+        report.append(f"  Avg DL RBs: {rb_str}")
+        report.append(f"  Verdict   : {verdict}")
+
+    def _check_geometry(self, low_df: pd.DataFrame, report: List[str]) -> None:
+        if self.PCI_COL not in self.df.columns:
+            report.append("Geometry Analysis: PCI column missing, skipped.")
+            return
+        pci_mode = low_df[self.PCI_COL].mode()
+        if pci_mode.empty:
+            report.append("Geometry Analysis: no dominant PCI found.")
+            return
+        pci = pci_mode.iloc[0]
+
+        avg_rsrp = (
+            low_df[self.RSRP_COL].mean()
+            if self.RSRP_COL in low_df.columns
+            else float("nan")
+        )
+        avg_sinr = (
+            low_df[self.SINR_COL].mean()
+            if self.SINR_COL in low_df.columns
+            else float("nan")
+        )
+        report.append(
+            f"Signal quality (low-TP samples): RSRP {avg_rsrp:.1f} dBm, SINR {avg_sinr:.1f} dB"
+        )
+
+        site_rows = self.eng_df[self.eng_df["PCI"] == pci]
+        if site_rows.empty:
+            report.append(
+                f"Geometry Analysis: PCI {int(pci)} not found in engineering data."
+            )
+            return
+
+        site = site_rows.iloc[0]
+        # Minimum required columns for geometry — Beam Scenario is optional (defaults to 6°)
+        required_cols = {
+            "Latitude",
+            "Longitude",
+            "Height",
+            "Mechanical Downtilt",
+            "Digital Tilt",
+        }
+        if not required_cols.issubset(set(self.eng_df.columns)):
+            report.append(
+                "Geometry Analysis: engineering data missing geometry columns, skipped."
+            )
+            return
+
+        ue_lat = (
+            low_df[self.LAT_COL].mean()
+            if self.LAT_COL in low_df.columns
+            else float("nan")
+        )
+        ue_lon = (
+            low_df[self.LON_COL].mean()
+            if self.LON_COL in low_df.columns
+            else float("nan")
+        )
+        dist_m = self._haversine(
+            ue_lat, ue_lon, float(site["Latitude"]), float(site["Longitude"])
+        )
+
+        height = float(site["Height"])
+        mech_tilt = float(site["Mechanical Downtilt"])
+        dig_tilt = self._digital_tilt(site["Digital Tilt"])
+        total_tilt = mech_tilt + dig_tilt
+        # Beam Scenario column is absent in the Phase-1 dataset — default to 6° BW
+        beam_scenario = (
+            site.get("Beam Scenario")
+            if "Beam Scenario" in self.eng_df.columns
+            else None
+        )
+        beamwidth = self._vertical_beamwidth(beam_scenario)
+        user_angle = math.degrees(math.atan2(height, dist_m)) if dist_m > 0 else 90.0
+
+        report.append(f"Geometry Analysis [TILT / DISTANCE] (dominant PCI {int(pci)}):")
+        report.append(f"  UE–site distance : {dist_m:.1f} m")
+        report.append(
+            f"  Beam config      : total tilt {total_tilt}°, vertical BW {beamwidth}°"
+        )
+        report.append(f"  UE depression    : {user_angle:.1f}°")
+
+        if user_angle < (total_tilt - beamwidth / 2):
+            tilt_verdict = "FAIL [TILT] — beam undershoots (UE above main lobe); consider reducing tilt"
+        elif user_angle > (total_tilt + beamwidth / 2):
+            tilt_verdict = "FAIL [TILT] — beam overshoots (UE below main lobe); consider increasing tilt"
+        else:
+            tilt_verdict = "PASS [TILT] — UE inside main lobe"
+        report.append(f"  Tilt verdict     : {tilt_verdict}")
+
+        dist_verdict = (
+            "FAIL [DISTANCE] — UE >1 km from site (overshoot)"
+            if dist_m > self.DIST_THR
+            else "PASS [DISTANCE]"
+        )
+        report.append(f"  Distance verdict : {dist_verdict}")
+
+    def _check_handovers(self, low_df: pd.DataFrame, report: List[str]) -> None:
+        if self.PCI_COL not in self.df.columns:
+            return
+        unique_pcis = low_df[self.PCI_COL].nunique()
+        verdict = (
+            "FAIL [HANDOVER] — multiple PCIs during low-TP window (ping-pong / missing neighbor)"
+            if unique_pcis > 1
+            else "PASS"
+        )
+        report.append(f"Handover Analysis [HANDOVER]:")
+        report.append(f"  Distinct serving PCIs during low-TP: {unique_pcis}")
+        report.append(f"  Verdict: {verdict}")
+
+    def _check_mod30(self, low_df: pd.DataFrame, report: List[str]) -> None:
+        if (
+            self.PCI_COL not in self.df.columns
+            or self.NB_PCI_COL not in self.df.columns
+        ):
+            report.append("Mod-30 Analysis [MOD30]: required columns missing, skipped.")
+            return
+        detected = False
+        for _, row in low_df.iterrows():
+            srv = row[self.PCI_COL]
+            nbr = row[self.NB_PCI_COL]
+            if pd.notna(srv) and pd.notna(nbr) and int(srv) % 30 == int(nbr) % 30:
+                detected = True
+                break
+        verdict = (
+            "FAIL [MOD30] — DMRS collision (serving % 30 == neighbor % 30)"
+            if detected
+            else "PASS"
+        )
+        report.append(f"Mod-30 / DMRS Analysis [MOD30]:")
+        report.append(f"  Collision detected: {'YES' if detected else 'NO'}")
+        report.append(f"  Verdict: {verdict}")
+
+    def _check_neighbors(self, low_df: pd.DataFrame, report: List[str]) -> None:
+        if (
+            self.RSRP_COL not in self.df.columns
+            or self.NB_RSRP_COL not in self.df.columns
+        ):
+            report.append(
+                "Neighbor Analysis [BETTER_NEIGHBOR / COLOCATION]: columns missing, skipped."
+            )
+            return
+
+        # Find the worst (smallest) RSRP delta over low-TP window
+        worst_row = None
+        min_delta = float("inf")
+        for _, row in low_df.iterrows():
+            s = row[self.RSRP_COL]
+            n = row[self.NB_RSRP_COL]
+            if pd.notna(s) and pd.notna(n) and (s - n) < min_delta:
+                min_delta = s - n
+                worst_row = row
+
+        report.append("Neighbor Analysis [BETTER_NEIGHBOR / COLOCATION]:")
+        if worst_row is None:
+            report.append("  No valid neighbor measurements found.")
+            return
+
+        s_pci = worst_row[self.PCI_COL]
+        n_pci = worst_row[self.NB_PCI_COL]
+        report.append(
+            f"  Peak interference: serving PCI {int(s_pci) if pd.notna(s_pci) else '?'} vs neighbor PCI {int(n_pci) if pd.notna(n_pci) else '?'}"
+        )
+        report.append(
+            f"  RSRP delta (serving − neighbor): {min_delta:.2f} dB  (< 0 means neighbor stronger)"
+        )
+
+        bn_verdict = (
+            "FAIL [BETTER_NEIGHBOR] — neighbor RSRP > serving"
+            if min_delta < 0
+            else "PASS"
+        )
+        report.append(f"  Better-neighbor verdict: {bn_verdict}")
+
+        if "gNodeB ID" in self.eng_df.columns and pd.notna(s_pci) and pd.notna(n_pci):
+            s_rows = self.eng_df[self.eng_df["PCI"] == s_pci]
+            n_rows = self.eng_df[self.eng_df["PCI"] == n_pci]
+            if not s_rows.empty and not n_rows.empty:
+                s_gnb = s_rows.iloc[0]["gNodeB ID"]
+                n_gnb = n_rows.iloc[0]["gNodeB ID"]
+                if s_gnb == n_gnb:
+                    report.append(
+                        "  Colocation verdict [COLOCATION]: COLOCATED (same gNodeB) — intra-site interference"
+                    )
+                else:
+                    # Non-colocated: check distance
+                    ue_lat = worst_row.get(self.LAT_COL, float("nan"))
+                    ue_lon = worst_row.get(self.LON_COL, float("nan"))
+                    nb_lat = n_rows.iloc[0].get("Latitude", float("nan"))
+                    nb_lon = n_rows.iloc[0].get("Longitude", float("nan"))
+                    try:
+                        dist = self._haversine(
+                            float(ue_lat), float(ue_lon), float(nb_lat), float(nb_lon)
+                        )
+                        report.append(
+                            f"  Colocation verdict [COLOCATION]: NON-COLOCATED — interferer {dist:.1f} m away"
+                        )
+                        if min_delta < 5:
+                            report.append(
+                                "  Verdict [COLOCATION]: CRITICAL — strong non-colocated interference (<5 dB delta)"
+                            )
+                    except Exception:
+                        report.append(
+                            "  Colocation verdict [COLOCATION]: NON-COLOCATED (distance unknown)"
+                        )

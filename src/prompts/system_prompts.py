@@ -18,6 +18,7 @@ from typing import Dict, Any, List
 # TRACK A — Skill Context (dynamically loaded, always injected into analysis agent)
 # ---------------------------------------------------------------------------
 
+
 def _load_track_a_skills() -> str:
     base_dir = os.path.dirname(os.path.dirname(__file__))
     file_path = os.path.join(base_dir, "skills", "track_a", "wireless_optimization.md")
@@ -26,31 +27,34 @@ def _load_track_a_skills() -> str:
             return f.read()
     return "## TRACK A SKILL\nNo skills found."
 
+
 TRACK_A_SKILL = _load_track_a_skills()
 
 # ---------------------------------------------------------------------------
 # TRACK B — Skill Context (dynamically loaded per task, injected into human prompt)
 # ---------------------------------------------------------------------------
 
+
 def _load_track_b_skills(task_type: str) -> str:
     base_dir = os.path.dirname(os.path.dirname(__file__))
-    
+
     # Map typical tasks. Provide default if unknown.
     task_map = {
         "TOPOLOGY_RESTORE": "topology_restore.md",
         "PATH_QUERY": "path_query.md",
-        "FAULT_DIAGNOSIS": "fault_diagnosis.md"
+        "FAULT_DIAGNOSIS": "fault_diagnosis.md",
     }
-    
-    task_key = str(task_type).upper().split('.')[-1]
-    filename = task_map.get(task_key, "fault_diagnosis.md") # Fallback
-    
+
+    task_key = str(task_type).upper().split(".")[-1]
+    filename = task_map.get(task_key, "fault_diagnosis.md")  # Fallback
+
     file_path = os.path.join(base_dir, "skills", "track_b", filename)
-    
+
     if os.path.exists(file_path):
         with open(file_path, "r", encoding="utf-8") as f:
             return f.read()
     return "## TRACK B SKILLS\nNo skills found."
+
 
 # ---------------------------------------------------------------------------
 # VENDOR_PARSER_SKILL — Centralized CLI format knowledge for ParserAgent
@@ -338,7 +342,32 @@ Your ONLY job is to call the available tools to fetch raw data for the scenario.
 Do NOT perform any analysis. Do NOT output reasoning. Call the tools and return.
 """
 
-TRACK_A_ANALYSIS_SYSTEM = f"""{TRACK_A_SKILL}"""
+TRACK_A_ANALYSIS_SYSTEM = f"""{TRACK_A_SKILL}
+
+## Forensic Report Interpretation Guide
+
+A deterministic forensic analysis tool has already run on the raw 5G drive-test data.
+Its report uses the following ROOT CAUSE labels — learn what each implies for option selection:
+
+| Label            | Root cause                                       | Typical fix category                        |
+|------------------|--------------------------------------------------|---------------------------------------------|
+| [SPEED]          | UE speed > 40 km/h → Doppler / HO instability   | Mobility/HO parameter tuning                |
+| [RESOURCE]       | DL RBs < 160 → resource starvation              | Check PDCCH config or transmission issues   |
+| [TILT]           | Beam geometry mismatch (under/overshoot)         | Tilt adjustment for the serving cell        |
+| [DISTANCE]       | UE > 1 km from site → coverage overshoot        | Power / azimuth adjustment or new neighbor  |
+| [HANDOVER]       | Multiple PCIs during low-TP → ping-pong / miss  | Add missing neighbor relationship           |
+| [BETTER_NEIGHBOR]| Neighbor RSRP > serving RSRP → wrong cell       | A3 threshold / HO parameter or add neighbor |
+| [COLOCATION]     | Interference from co-/non-colocated cell         | Power reduction or DMRS/PCI planning        |
+| [MOD30]          | DMRS collision (serving PCI % 30 == nbr PCI % 30)| Frequency plan / PCI re-assignment          |
+
+Use the FAIL verdicts in the report to identify active root causes, then match them to the
+specific cell/action described in the Candidate Options.
+
+CRITICAL OUTPUT RULES:
+- Think step by step, referencing evidence from the Forensic Report.
+- End your response with a line: ANSWER: <options in ascending order, pipe-separated>
+- The ANSWER line MUST appear AFTER any reasoning — never inside <think> blocks.
+"""
 
 TRACK_B_DECOMPOSE_SYSTEM = """You are a task decomposition agent for IP network troubleshooting.
 
@@ -393,6 +422,7 @@ def build_track_a_analysis_prompt(
     ----------
     features : dict
         Pre-computed numeric/boolean feature dict from feature_extraction_node.
+        May include ``forensic_report`` key produced by NetworkForensicAnalyzer.
     rag_context : str
         Formatted few-shot examples string from TabularRAG.format_context().
     options : dict
@@ -400,6 +430,10 @@ def build_track_a_analysis_prompt(
     tag : str
         "single-answer" or "multiple-answer".
     """
+    forensic_report = features.get("forensic_report", "")
+    # Build a clean features summary without the long forensic_report string
+    summary_features = {k: v for k, v in features.items() if k != "forensic_report"}
+
     options_block = "\n".join(f"  {k}: {v}" for k, v in sorted(options.items()))
     tag_instruction = (
         "Select EXACTLY ONE option."
@@ -407,8 +441,14 @@ def build_track_a_analysis_prompt(
         else "Select EXACTLY 2 or EXACTLY 4 options (never 1, 3, or more than 4), pipe-separated, ascending order."
     )
 
-    return f"""## Scenario Features
-{features}
+    forensic_section = (
+        f"\n## Deterministic Forensic Report\n{forensic_report}"
+        if forensic_report
+        else ""
+    )
+
+    return f"""## Scenario Features (Summary)
+{summary_features}{forensic_section}
 
 ## Similar Past Scenarios (Few-Shot Examples)
 {rag_context if rag_context else "(none available)"}
@@ -418,7 +458,9 @@ def build_track_a_analysis_prompt(
 
 ## Task
 {tag_instruction}
-Analyze the features above, apply the domain rules from your skill context, and determine the correct answer.
+Use the Forensic Report above to identify the root cause(s), then map each root cause to the SPECIFIC candidate option(s) that best address it.
+The Forensic Report uses descriptive labels (e.g. [SPEED], [TILT], [BETTER_NEIGHBOR], [MOD30]) — these are ROOT CAUSE indicators, NOT option IDs.
+Your final ANSWER must reference the option IDs (C1, C2, …) from the Candidate Options list above.
 """
 
 
