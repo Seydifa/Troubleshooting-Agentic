@@ -143,13 +143,22 @@ def main(argv: list[str] | None = None) -> None:
 
     # ------------------------------------------------------------------
     # Load environment
+    # .env always wins — override=True prevents notebook/shell env vars
+    # (e.g. MODEL_NAME exported from a Jupyter cell) from bleeding in.
     # ------------------------------------------------------------------
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(override=True)
     except ImportError:
         logger.warning("python-dotenv not installed; skipping .env load")
+
+    # Flush any LLM singletons that may have been created with stale env vars
+    try:
+        from src.llm import clear_llm_cache
+        clear_llm_cache()
+    except Exception:
+        pass
 
     env = os.getenv("ENV", "dev")
     logger.info("Environment: %s", env)
