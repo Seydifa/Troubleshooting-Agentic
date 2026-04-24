@@ -185,12 +185,13 @@ class Orchestrator:
         )
         return sid, answer, final_state, elapsed, status
 
-    def _run_question_b(self, scenario: Dict[str, Any]) -> tuple[str, str, float, str]:
+    def _run_question_b(self, scenario: Dict[str, Any]) -> tuple[str, str, Dict[str, Any], float, str]:
         """Run the Track B LangGraph for one scenario (thread-safe budget check).
 
-        Returns (scenario_id, answer, elapsed_s, status).
+        Returns (scenario_id, answer, final_state, elapsed_s, status).
         """
         sid = scenario.get("scenario_id", "")
+        final_state: Dict[str, Any] = {}
         with self._budget_lock:
             if self._budget_used >= self._daily_limit:
                 logger.warning(
@@ -199,14 +200,14 @@ class Orchestrator:
                     self._daily_limit,
                     sid,
                 )
-                return sid, "", 0.0, "skipped"
+                return sid, "", final_state, 0.0, "skipped"
 
         logger.info("[Track B] Processing %s", sid)
         status = "ok"
         t0 = time.perf_counter()
         try:
             initial_state = make_initial_state_b(scenario)
-            final_state: QuestionStateB = self._graph_b.invoke(initial_state)
+            final_state = self._graph_b.invoke(initial_state)
             answer = final_state.get("answer") or final_state.get("raw_answer", "")
             if not answer:
                 status = "empty"
@@ -222,4 +223,4 @@ class Orchestrator:
         logger.info(
             "[Track B] %s → %s  (%.1fs, status=%s)", sid, answer, elapsed, status
         )
-        return sid, answer, elapsed, status
+        return sid, answer, final_state, elapsed, status

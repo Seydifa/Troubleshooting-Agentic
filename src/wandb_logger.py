@@ -33,15 +33,16 @@ logger = logging.getLogger(__name__)
 _TABLE_COLUMNS = [
     "idx",
     "scenario_id",
+    "task_id",
     "track",
-    "answer",
-    "ground_truth",
+    "label",
+    "prediction",
     "exact_match",
-    "problem_type",
-    "retry_count",
     "status",
     "elapsed_s",
-    "reasoning_preview",
+    "raw_output",
+    "reasoning",
+    "rag_context",
 ]
 
 # Rebuild and log the table to W&B every N rows (for real-time table monitoring)
@@ -161,15 +162,16 @@ class WandbLogger:
             return
         self._log_row(
             scenario_id=scenario_id,
+            task_id=str(final_state.get("task_id", "")),
             track="A",
-            answer=answer,
-            ground_truth="",
+            label="",
+            prediction=answer,
             exact_match=None,
-            problem_type=str(final_state.get("problem_type", "")),
-            retry_count=int(final_state.get("retry_count", 0)),
             status=status,
             elapsed_s=elapsed_s,
-            reasoning_preview=str(final_state.get("reasoning", ""))[:300],
+            raw_output=str(final_state.get("raw_answer", ""))[:1000],
+            reasoning=str(final_state.get("reasoning", ""))[:1000],
+            rag_context=str(final_state.get("context", "") or final_state.get("rag_context", ""))[:1500],
         )
 
     def log_eval(
@@ -184,28 +186,30 @@ class WandbLogger:
     ) -> None:
         """Log one labelled eval scenario (track_a_evaluation notebook §10).
 
-        Includes ``ground_truth`` and ``exact_match`` columns so you can
+        Includes ``label`` and ``exact_match`` columns so you can
         watch accuracy climb in real time on the W&B dashboard.
         """
         if not self._enabled:
             return
         self._log_row(
             scenario_id=scenario_id,
+            task_id=str(final_state.get("task_id", "")),
             track="A",
-            answer=answer,
-            ground_truth=ground_truth,
+            label=ground_truth,
+            prediction=answer,
             exact_match=exact_match,
-            problem_type=str(final_state.get("problem_type", "")),
-            retry_count=int(final_state.get("retry_count", 0)),
             status=status,
             elapsed_s=elapsed_s,
-            reasoning_preview=str(final_state.get("reasoning", ""))[:300],
+            raw_output=str(final_state.get("raw_answer", ""))[:1000],
+            reasoning=str(final_state.get("reasoning", ""))[:1000],
+            rag_context=str(final_state.get("context", "") or final_state.get("rag_context", ""))[:1500],
         )
 
     def log_track_b(
         self,
         scenario_id: str,
         answer: str,
+        final_state: Dict[str, Any],
         elapsed_s: float,
         status: str = "ok",
     ) -> None:
@@ -214,15 +218,16 @@ class WandbLogger:
             return
         self._log_row(
             scenario_id=scenario_id,
+            task_id=str(final_state.get("task_id", "")),
             track="B",
-            answer=answer,
-            ground_truth="",
+            label="",
+            prediction=answer,
             exact_match=None,
-            problem_type="",
-            retry_count=0,
             status=status,
             elapsed_s=elapsed_s,
-            reasoning_preview="",
+            raw_output=str(final_state.get("raw_answer", ""))[:1000],
+            reasoning=str(final_state.get("reasoning", ""))[:1000],
+            rag_context=str(final_state.get("context", "") or final_state.get("rag_context", ""))[:1500],
         )
 
     def log_summary(self, metrics: Dict[str, float]) -> None:
@@ -266,15 +271,16 @@ class WandbLogger:
     def _log_row(
         self,
         scenario_id: str,
+        task_id: str,
         track: str,
-        answer: str,
-        ground_truth: str,
+        label: str,
+        prediction: str,
         exact_match,
-        problem_type: str,
-        retry_count: int,
         status: str,
         elapsed_s: float,
-        reasoning_preview: str,
+        raw_output: str,
+        reasoning: str,
+        rag_context: str,
     ) -> None:
         """Append one row, emit per-step scalars, and flush table periodically."""
         with self._lock:
@@ -283,30 +289,30 @@ class WandbLogger:
             row = [
                 idx,
                 scenario_id,
+                task_id,
                 track,
-                answer,
-                ground_truth,
+                label,
+                prediction,
                 exact_match,
-                problem_type,
-                retry_count,
                 status,
                 round(elapsed_s, 2),
-                reasoning_preview,
+                raw_output,
+                reasoning,
+                rag_context,
             ]
             self._rows.append(row)
 
             # Real-time scalar metrics (appear as line charts in W&B)
             scalars: Dict[str, Any] = {
                 "latency/elapsed_s": elapsed_s,
-                "agent/retry_count": retry_count,
-                "agent/answer_len": len(answer),
-                "agent/is_empty": int(not answer.strip()),
+                "agent/answer_len": len(prediction),
+                "agent/is_empty": int(not prediction.strip()),
                 "agent/is_error": int(status == "error"),
             }
             if exact_match is not None:
                 scalars["eval/exact_match"] = int(exact_match)
                 # Rolling accuracy (mean of all logged exact_match values)
-                _em_vals = [r[5] for r in self._rows if r[5] is not None]
+                _em_vals = [r[6] for r in self._rows if r[6] is not None]
                 if _em_vals:
                     scalars["eval/rolling_accuracy"] = sum(_em_vals) / len(_em_vals)
 
