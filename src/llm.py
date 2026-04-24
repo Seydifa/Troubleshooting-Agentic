@@ -6,12 +6,12 @@ Reads config from the ``src.config`` module (accessed dynamically so that
 notebook Cell 4 setting patches are always visible).
 
 Two public factories:
-- ``get_reasoning_llm()``  — analysis/reasoning agents (Qwen3.5 thinking mode)
+- ``get_reasoning_llm()``  — analysis/reasoning agents (Qwen3 thinking mode)
 - ``get_parser_llm()``     — JSON-only parsing agents (non-thinking, temperature=0)
 
 Both functions return a **module-level singleton** — the same instance is
-shared across all agents so the LLM backend maintains a single connection pool
-and the Python overhead of repeated object creation is eliminated.
+shared across all agents so Ollama maintains a single connection pool and the
+Python overhead of repeated object creation is eliminated.
 
 Call ``clear_llm_cache()`` after changing settings (e.g. switching ENV) to
 force re-initialisation on the next call.
@@ -24,8 +24,8 @@ from typing import Any
 
 import src.config as _config  # module reference — sees live settings patches
 
-# Competition model — Qwen3.5-35B-A3B (mandatory, no substitution allowed)
-_PROD_MODEL = "Qwen/Qwen3.5-35B-A3B"
+# Fallback prod model when MODEL_NAME is not set in environment
+_PROD_MODEL = "Qwen/Qwen3-235B-A22B"
 
 # Module-level singletons — shared by every agent
 _reasoning_llm: Any = None
@@ -35,34 +35,31 @@ _parser_llm: Any = None
 def get_reasoning_llm() -> Any:
     """Return the shared reasoning LLM (lazy-initialised singleton).
 
-    - dev  → ChatOpenAI (local vLLM, Qwen3.5 thinking mode: temp=0.6, top_p=0.95)
-    - prod → ChatOpenAI (OpenRouter, temp=0.6)
+    - dev  → ChatOllama  (Qwen3 thinking mode: temp=0.6, top_p=0.95, top_k=20)
+    - prod → ChatOpenAI  (OpenRouter, temp=0.3)
     """
     global _reasoning_llm
     if _reasoning_llm is None:
-        from langchain_openai import ChatOpenAI
-
         if _config.settings.env == "prod":
+            from langchain_openai import ChatOpenAI
+
             _reasoning_llm = ChatOpenAI(
                 model=os.getenv("MODEL_NAME", _PROD_MODEL),
                 base_url=_config.settings.openrouter_base_url,
                 api_key=_config.settings.openrouter_api_key,
-                temperature=0.6,
-                top_p=0.95,
-                extra_body={
-                    "top_k": 20,
-                },
+                temperature=0.3,
             )
         else:
-            _reasoning_llm = ChatOpenAI(
+            from langchain_ollama import ChatOllama
+
+            _reasoning_llm = ChatOllama(
                 model=_config.settings.model_name,
-                base_url=_config.settings.vllm_base_url,
-                api_key=_config.settings.vllm_api_key,
+                base_url=_config.settings.ollama_base_url,
+                # Disable Qwen3 extended thinking at the API level
+                think=False,
                 temperature=0.6,
                 top_p=0.95,
-                extra_body={
-                    "top_k": 20,
-                },
+                top_k=20,
             )
     return _reasoning_llm
 
@@ -70,37 +67,31 @@ def get_reasoning_llm() -> Any:
 def get_parser_llm() -> Any:
     """Return the shared parser LLM (lazy-initialised singleton).
 
-    JSON-only agents — thinking mode disabled via API parameter
-    ``chat_template_kwargs: {"enable_thinking": False}``.
+    JSON-only agents — thinking mode disabled via /no_think in the prompt.
 
-    - dev  → ChatOpenAI (local vLLM, temperature=0 for determinism)
-    - prod → ChatOpenAI (OpenRouter, temperature=0, max_tokens=1024)
+    - dev  → ChatOllama  (PARSER_MODEL_NAME, temperature=0 for determinism)
+    - prod → ChatOpenAI  (OpenRouter, temperature=0, max_tokens=1024)
     """
     global _parser_llm
     if _parser_llm is None:
-        from langchain_openai import ChatOpenAI
-
         if _config.settings.env == "prod":
+            from langchain_openai import ChatOpenAI
+
             _parser_llm = ChatOpenAI(
                 model=os.getenv("MODEL_NAME", _PROD_MODEL),
                 base_url=_config.settings.openrouter_base_url,
                 api_key=_config.settings.openrouter_api_key,
                 temperature=0,
                 max_tokens=1024,
-                extra_body={
-                    "chat_template_kwargs": {"enable_thinking": False},
-                },
             )
         else:
-            _parser_llm = ChatOpenAI(
+            from langchain_ollama import ChatOllama
+
+            _parser_llm = ChatOllama(
                 model=_config.settings.parser_model_name,
-                base_url=_config.settings.vllm_base_url,
-                api_key=_config.settings.vllm_api_key,
+                base_url=_config.settings.ollama_base_url,
+                # Qwen3 non-thinking mode: temperature=0 for JSON determinism
                 temperature=0,
-                max_tokens=1024,
-                extra_body={
-                    "chat_template_kwargs": {"enable_thinking": False},
-                },
             )
     return _parser_llm
 

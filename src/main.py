@@ -156,7 +156,6 @@ def main(argv: list[str] | None = None) -> None:
     # Flush any LLM singletons that may have been created with stale env vars
     try:
         from src.llm import clear_llm_cache
-
         clear_llm_cache()
     except Exception:
         pass
