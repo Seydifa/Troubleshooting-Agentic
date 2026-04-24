@@ -9,6 +9,8 @@ Dependencies: None (stdlib only).
 
 from __future__ import annotations
 
+import glob
+import os
 from typing import Dict, Any, List
 
 
@@ -68,10 +70,10 @@ delta_db = neighbor_rsrp - serving_rsrp
 """
 
 # ---------------------------------------------------------------------------
-# TRACK B — Skill Context (static, always injected into reasoning agent)
+# TRACK B — Skill Context (dynamically loaded, always injected into reasoning agent)
 # ---------------------------------------------------------------------------
 
-TRACK_B_SKILLS = """
+_TRACK_B_BASE_RULES = """
 ## TRACK B SKILL — IP Network Troubleshooting Domain Rules
 
 ### Link Discovery Priority
@@ -111,6 +113,31 @@ FAULT_DIAGNOSIS: single line, semicolon-separated:
 - If LLDP is empty for a node but ARP shows a neighbour match, use ARP
 - Port canonical forms: GigabitEthernet → GE, Ten-GigabitEthernet → XGE, Ethernet → Eth
 """
+
+def _load_track_b_skills() -> str:
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    skills_dir = os.path.join(base_dir, "skills")
+    
+    parts = [_TRACK_B_BASE_RULES.strip()]
+    
+    if os.path.exists(skills_dir):
+        skill_files = glob.glob(os.path.join(skills_dir, "*", "SKILL.md"))
+        for filepath in sorted(skill_files):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    # Strip YAML frontmatter if present
+                    if content.startswith("---"):
+                        split_content = content.split("---", 2)
+                        if len(split_content) >= 3:
+                            content = split_content[2].strip()
+                    parts.append(content)
+            except Exception:
+                pass
+                
+    return "\n\n" + "\n\n---\n\n".join(parts) + "\n\n"
+
+TRACK_B_SKILLS = _load_track_b_skills()
 
 # ---------------------------------------------------------------------------
 # VENDOR_PARSER_SKILL — Centralized CLI format knowledge for ParserAgent
